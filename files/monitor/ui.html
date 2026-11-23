@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Monitor</title>
+<style>
+  :root {
+    --bg:#0f1218; --panel:#141922; --line:#2a3240; --text:#d7dde6; --dim:#7f8a99; --faint:#4a5463;
+    --sonnet:#ff9a5c; --haiku:#7fb2ff; --decider:#6fdc8c; --opus:#c4a1ff; --err:#ff6b6b; --warn:#ffd36b;
+  }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+    --bg:#f5f6f8; --panel:#ffffff; --line:#d5dae2; --text:#1d232c; --dim:#5f6a78; --faint:#a3acb8;
+    --sonnet:#c4561b; --haiku:#2f6fd6; --decider:#1f8a43; --opus:#7a4fcf; --err:#c62828; --warn:#8a5d00;
+  }}
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace; }
+  .wrap { max-width:1100px; margin:0 auto; padding:18px 16px 70px; }
+  .title { text-align:center; font-weight:700; letter-spacing:.06em; margin-bottom:8px; }
+  .title .s { color:var(--sonnet); } .title .h { color:var(--haiku); } .title .o { color:var(--opus); }
+  .legend { display:flex; flex-wrap:wrap; justify-content:center; gap:18px; color:var(--dim); margin-bottom:16px; }
+  .legend i { display:inline-block; width:9px; height:9px; margin-right:6px; vertical-align:0; }
+  .grid { display:grid; grid-template-columns:230px 1fr; gap:18px; }
+  @media (max-width:820px) { .grid { grid-template-columns:1fr; } }
+  .box { border:1.5px solid var(--c, var(--line)); border-radius:4px; padding:10px 12px; background:var(--panel); }
+  .head { color:var(--c); font-weight:700; }
+  .dim { color:var(--dim); } .faint { color:var(--faint); }
+  .center { text-align:center; }
+  /* opus column */
+  .opus { --c:var(--opus); display:flex; flex-direction:column; gap:10px; }
+  .moment { display:flex; gap:8px; align-items:baseline; color:var(--dim); }
+  .moment .d { color:var(--faint); }
+  .moment.hit { color:var(--text); } .moment.hit .d { color:var(--opus); }
+  .moment .n { margin-left:auto; color:var(--opus); }
+  .advice { border-left:2px solid var(--opus); padding-left:8px; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; max-height:150px; overflow:auto; }
+  .kv { display:flex; justify-content:space-between; }
+  .kv b { color:var(--opus); font-weight:700; }
+  .thinking { color:var(--opus); animation:blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity:.35; } }
+  /* main column */
+  .col { display:flex; flex-direction:column; align-items:center; gap:0; }
+  .sonnet { --c:var(--sonnet); width:min(380px,100%); text-align:center; }
+  .wire { width:1.5px; height:18px; background:var(--faint); }
+  .wire.live { background:var(--c); }
+  .node { width:9px; height:9px; border-radius:50%; background:var(--faint); }
+  .node.live { background:var(--c); box-shadow:0 0 8px var(--c); }
+  .forks { --c:var(--decider); width:min(470px,100%); }
+  .fork { display:grid; grid-template-columns:110px 1fr 42px 48px; gap:8px; align-items:center; margin:3px 0; }
+  .meter { height:12px; background:color-mix(in srgb,var(--decider) 12%,transparent); position:relative; }
+  .meter i { position:absolute; inset:0 auto 0 0; background:var(--decider); transition:width .4s; }
+  .sharp { color:var(--decider); } .split { color:var(--warn); }
+  .label { color:var(--dim); margin:6px 0 2px; }
+  .label b { color:var(--haiku); }
+  .agents { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; width:100%; margin-top:4px; }
+  .agent { --c:var(--haiku); text-align:center; min-height:132px; display:flex; flex-direction:column; gap:3px; }
+  .agent.idle { --c:var(--line); }
+  .agent .nm { font-weight:700; color:var(--text); }
+  .agent .md { color:var(--haiku); }
+  .agent .task { color:var(--dim); font-size:12px; overflow-wrap:anywhere; max-height:38px; overflow:hidden; }
+  .agent .st { margin-top:auto; }
+  .bar { height:10px; background:color-mix(in srgb,var(--haiku) 14%,transparent); position:relative; margin:4px 0; }
+  .bar i { position:absolute; inset:0 auto 0 0; background:var(--haiku); }
+  .bar.run i { width:35% !important; animation:slide 1.3s ease-in-out infinite alternate; }
+  @keyframes slide { from { left:0; } to { left:65%; } }
+  .back { --c:var(--sonnet); width:min(380px,100%); text-align:center; }
+  .bus { width:100%; display:flex; justify-content:center; }
+  /* cost */
+  .cost { margin-top:22px; border:1.5px solid var(--line); border-radius:4px; padding:12px; position:relative; }
+  .cost .lt, .log .lt { position:absolute; top:-10px; left:14px; background:var(--bg); padding:0 6px; color:var(--dim); }
+  .ctiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; }
+  .big { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .stack { display:flex; height:10px; margin:12px 0; background:var(--line); overflow:hidden; border-radius:2px; }
+  .stack i { display:block; height:100%; transition:width .4s; }
+  .cgrid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:820px) { .cgrid { grid-template-columns:1fr; } }
+  .crow { display:grid; grid-template-columns:1fr auto auto; gap:10px; font-variant-numeric:tabular-nums; }
+  .crow span:nth-child(2) { color:var(--dim); }
+  .agent .cst { color:var(--dim); font-size:12px; }
+  /* log */
+  .log { margin-top:22px; border:1.5px solid var(--line); border-radius:4px; padding:4px 12px 10px; position:relative; }
+  .log .lt { position:absolute; top:-10px; left:14px; background:var(--bg); padding:0 6px; color:var(--dim); }
+  .lines { max-height:260px; overflow:auto; margin-top:8px; }
+  .ln { display:grid; grid-template-columns:72px 92px 1fr; gap:10px; white-space:nowrap; }
+  .ln span:last-child { overflow:hidden; text-overflow:ellipsis; }
+  .ln .ts { color:var(--faint); }
+  .a-sonnet { color:var(--sonnet); } .a-haiku { color:var(--haiku); } .a-decider { color:var(--decider); }
+  .a-opus { color:var(--opus); } .a-err { color:var(--err); } .a-user { color:var(--text); }
+  /* status bar */
+  .statusbar { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line);
+               padding:8px 16px; display:flex; flex-wrap:wrap; gap:18px; align-items:center; }
+  .statusbar b { font-weight:700; }
+  button { font:inherit; background:transparent; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 10px; cursor:pointer; }
+  button:hover { border-color:var(--dim); }
+  .empty { color:var(--faint); padding:6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="title">CLAUDE CODE · AGENT MONITOR &nbsp;·&nbsp; <span class="s" id="tSonnet">SONNET</span> BUILDS &nbsp;·&nbsp; <span class="h">HAIKU</span> SWARMS &nbsp;·&nbsp; <span class="o" id="tOpus">OPUS</span> REVIEWS</div>
+  <div class="legend">
+    <span><i style="background:var(--sonnet)"></i><span id="lgSonnet">sonnet</span> · lead</span>
+    <span><i style="background:var(--haiku)"></i>haiku · swarm</span>
+    <span><i style="background:var(--decider)"></i>decider · forks</span>
+    <span><i style="background:var(--opus)"></i><span id="lgOpus">opus</span> · advisor</span>
+  </div>
+
+  <div class="grid">
+    <!-- OPUS -->
+    <div class="box opus">
+      <div><div class="head" id="opName">OPUS</div><div class="dim">advisor · <span id="opState">on call</span></div></div>
+      <div class="moment" id="m-plan"><span class="d">◇</span>before a plan<span class="n"></span></div>
+      <div class="moment" id="m-err"><span class="d">◇</span>same error ×2<span class="n"></span></div>
+      <div class="moment" id="m-done"><span class="d">◇</span>before done<span class="n"></span></div>
+      <div class="dim">Reads the whole session: every tool call and result. Silent on routine turns.</div>
+      <div><div class="dim">last advice:</div><div class="advice" id="opAdvice"><span class="faint">none yet</span></div></div>
+      <div class="kv"><span class="dim">calls</span><b id="opCalls">0</b></div>
+      <div class="kv"><span class="dim">tokens read</span><b id="opTokens">0</b></div>
+      <div class="kv"><span class="dim">repeated errors</span><b id="opErrs">0</b></div>
+      <div class="dim">Never writes code itself. Sonnet applies the advice.</div>
+    </div>
+
+    <!-- MAIN -->
+    <div class="col">
+      <div class="box sonnet">
+        <div class="head" id="snName">Sonnet · main session</div>
+        <div id="snDoing">waiting</div>
+        <div class="dim" id="snCounts">0 tool calls</div>
+        <div class="faint" id="snSession">no session yet</div>
+      </div>
+      <div class="wire" id="w1" style="--c:var(--sonnet)"></div><div class="node" id="n1" style="--c:var(--sonnet)"></div><div class="wire" id="w2" style="--c:var(--decider)"></div>
+
+      <div class="box forks">
+        <div style="display:flex;justify-content:space-between"><span class="head">DECIDER · fork layer</span><span><span class="dim">forks</span> <b class="sharp" id="fkTotal">0</b></span></div>
+        <div class="faint" id="fkModel"></div>
+        <div id="fkRows"></div>
+        <div class="dim" style="margin-top:4px"><span class="sharp">sharp</span> → runs in code · <span class="split">split</span> → Sonnet decides</div>
+      </div>
+
+      <div class="wire" id="w3" style="--c:var(--haiku)"></div>
+      <div class="label">delegate to subagents · <b id="hkModel">haiku</b></div>
+      <div class="node" id="n2" style="--c:var(--haiku)"></div><div class="wire" id="w4" style="--c:var(--haiku)"></div>
+      <div class="agents" id="agents"></div>
+      <div class="wire" id="w5" style="--c:var(--haiku)"></div><div class="node" id="n3" style="--c:var(--sonnet)"></div><div class="wire" id="w6" style="--c:var(--sonnet)"></div>
+      <div class="box back"><div class="head">back to <span id="bkName">Sonnet</span> · lead</div><div>review + verify</div><div class="dim" id="bkState">–</div></div>
+    </div>
+  </div>
+
+  <div class="cost">
+    <span class="lt">cost · from transcripts at API prices</span>
+    <div class="ctiles">
+      <div><div class="dim">total</div><div class="big" id="cTotal">$0</div><div class="faint" id="cTotalSub">–</div></div>
+      <div><div class="a-sonnet" id="lbMain">lead</div><div class="big" id="cMain">$0</div><div class="faint" id="cMainSub">–</div></div>
+      <div><div class="a-haiku" id="lbSub">swarm</div><div class="big" id="cSub">$0</div><div class="faint" id="cSubSub">–</div></div>
+      <div><div class="a-opus" id="lbAdv">advisor</div><div class="big" id="cAdv">$0</div><div class="faint" id="cAdvSub">–</div></div>
+    </div>
+    <div class="stack" id="cStack"></div>
+    <div class="cgrid">
+      <div><div class="dim">tokens by kind ($ value)</div><div id="cKinds"></div></div>
+      <div><div class="dim">by session</div><div id="cSessions"><div class="faint">none yet</div></div></div>
+    </div>
+    <div class="faint" id="cNote"></div>
+  </div>
+
+  <div class="log"><span class="lt">session log</span><div class="lines" id="log"><div class="empty">No events yet. Start a Claude Code session and give it a task; events will appear here.</div></div></div>
+</div>
+
+<div class="statusbar">
+  <span id="sbConn" class="faint">● connecting</span>
+  <span>haiku <b class="a-haiku" id="sbHaiku">[idle]</b></span>
+  <span>subagents <b class="a-haiku" id="sbSub">[0/0]</b></span>
+  <span>opus <b class="a-opus" id="sbOpus">[on call]</b></span>
+  <span>decider <b class="a-decider" id="sbFork">[0 forks]</b></span>
+  <span>cost <b id="sbCost">$0</b></span>
+  <span style="margin-left:auto"></span>
+  <button id="btnToggle">pause logging</button><button id="btnClear">clear log</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const hms = t => new Date(t*1000).toLocaleTimeString("vi-VN", {hour12:false});
+const pretty = m => (m||"?").replace(/^claude-/,"").replace(/-(\d+)-(\d+)$/," $1.$2").replace(/^./, c => c.toUpperCase());
+const AGENT_TOOLS = new Set(["Agent","Task"]);
+const EDIT_TOOLS = new Set(["Edit","Write","NotebookEdit","MultiEdit"]);
+let CFG = {agents:{}}, S;
+
+function reset() {
+  S = { agents:{}, pending:[], tools:0, edits:0, bash:0, errors:0, errSig:{}, repeated:0,
+        advisor:{calls:0, moments:{plan:0,err:0,done:0}, last:null, busy:false, lastErrRepeat:false},
+        forks:{total:0, cats:{}}, session:null, mainDoing:"waiting", lastT:0, logs:[],
+        cost:{total:0, role:{main:0, subagent:0, advisor:0}, tok:{main:{}, subagent:{}, advisor:{}}, kind:{in:0,out:0,cw5:0,cw1h:0,cr:0},
+              kindTok:{in:0,out:0,cw5:0,cw1h:0,cr:0}, agent:{}, session:{}, unknown:new Set(), models:{main:new Set(), subagent:new Set(), advisor:new Set()}} };
+  for (const [name, a] of Object.entries(CFG.agents)) S.agents[name] = {name, model:a.model, runs:0, running:0, task:"", result:"", tool:"", t0:0, ms:0};
+  $("log").innerHTML = '<div class="empty">No events yet. Start a Claude Code session and give it a task; events will appear here.</div>';
+  render();
+}
+function agentFor(type) {
+  const k = type || "general-purpose";
+  if (!S.agents[k]) S.agents[k] = {name:k, model:CFG.agents[k]?.model || "", runs:0, running:0, task:"", result:"", tool:"", t0:0, ms:0};
+  return S.agents[k];
+}
+function log(t, actor, cls, text) {
+  const box = $("log"); if (box.querySelector(".empty")) box.innerHTML = "";
+  const el = document.createElement("div"); el.className = "ln";
+  el.innerHTML = `<span class="ts">${hms(t)}</span><span class="${cls}">${esc(actor)}</span><span>${esc(text)}</span>`;
+  box.prepend(el); while (box.children.length > 300) box.lastChild.remove();
+}
+function category(q) {
+  q = q.toLowerCase();
+  if (/file|path|tệp|đường dẫn|edit/.test(q)) return "which file";
+  if (/tool|agent|công cụ|subagent/.test(q)) return "which tool";
+  if (/retr|thử lại|stop|give/.test(q)) return "retry or stop";
+  return "other";
+}
+const short = (s, n=70) => { s = String(s||""); return s.length > n ? s.slice(0, n-1) + "…" : s; };
+
+function onEvent(e) {
+  S.lastT = e.t;
+  if (e.session && e.session !== S.session) { S.session = e.session; }
+  const sub = !!e.agent_id;
+  switch (e.ev) {
+    case "UserPromptSubmit":
+      if ((e.prompt || "").startsWith("<task-notification")) { log(e.t, "haiku", "a-haiku", "↩ subagent result back to Sonnet"); S.mainDoing = "reading subagent result"; }
+      else { log(e.t, "you", "a-user", e.prompt); S.mainDoing = "new request"; }
+      break;
+    case "PreToolUse": {
+      if (e.tool && e.tool.toLowerCase() === "advisor") {
+        const a = S.advisor; a.calls++; a.busy = true;
+        const m = S.edits === 0 ? "plan" : (a.lastErrRepeat ? "err" : "done");
+        a.moments[m]++; a.lastErrRepeat = false; a.pendingMoment = m;
+        log(e.t, "opus", "a-opus", {plan:"before a plan", err:"same error ×2", done:"before done"}[m] + " · reviewing the whole session");
+        break;
+      }
+      if (sub) { const ag = Object.values(S.agents).find(x => x.id === e.agent_id); if (ag) ag.tool = `${e.tool} ${short(e.input, 40)}`; break; }
+      S.tools++; if (EDIT_TOOLS.has(e.tool)) S.edits++; if (e.tool === "Bash") S.bash++;
+      if (AGENT_TOOLS.has(e.tool)) { S.pending.push({input:e.input, t:e.t}); S.mainDoing = "delegating to a subagent"; log(e.t, "sonnet", "a-sonnet", `delegate → ${e.input}`); }
+      else { S.mainDoing = `${e.tool} ${short(e.input, 48)}`; }
+      break; }
+    case "PostToolUse":
+      if (e.tool && e.tool.toLowerCase() === "advisor") { S.advisor.busy = false; S.advisor.last = e.result || "(no content)"; log(e.t, "opus", "a-opus", "advice sent → back to sonnet"); }
+      break;
+    case "PostToolUseFailure": {
+      S.errors++; const sig = short(e.error, 80); S.errSig[sig] = (S.errSig[sig]||0) + 1;
+      if (S.errSig[sig] === 2) { S.repeated++; S.advisor.lastErrRepeat = true; }
+      log(e.t, sub ? "haiku" : "sonnet", "a-err", `✗ ${e.tool}: ${e.error}`); break; }
+    case "SubagentStart": {
+      const ag = agentFor(e.agent_type); ag.running++; ag.runs++; ag.id = e.agent_id; ag.t0 = e.t; ag.result = ""; ag.tool = "";
+      const i = S.pending.findIndex(p => p.input.startsWith((e.agent_type||"") + ":")); const p = S.pending.splice(i >= 0 ? i : 0, 1)[0];
+      ag.task = p ? p.input.replace(/^[^:]+:\s*/, "") : "";
+      log(e.t, "haiku", "a-haiku", `${ag.name} started · ${short(ag.task, 60)}`); break; }
+    case "SubagentStop": {
+      const ag = Object.values(S.agents).find(x => x.id === e.agent_id) || agentFor(e.agent_type);
+      ag.running = Math.max(0, ag.running - 1); ag.ms = ag.t0 ? (e.t - ag.t0) * 1000 : 0; ag.result = e.result || ""; ag.tool = "";
+      if (!ag.runs) ag.runs = 1;    // start event was missed (monitor turned on mid-run)
+      log(e.t, "haiku", "a-haiku", `${ag.name} done${ag.ms ? ` in ${(ag.ms/1000).toFixed(1)}s` : ""} → ${short(ag.result, 60)}`);
+      S.mainDoing = "synthesizing subagent results"; break; }
+    case "Usage": {
+      const P = CFG.pricing || {}; let p = P[e.model];
+      if (!p) { S.cost.unknown.add(e.model || "?"); break; }
+      if (e.long && p.long) p = p.long;
+      const C = S.cost; let c = 0;
+      for (const k of ["in","out","cw5","cw1h","cr"]) { const v = (e[k]||0) * p[k] / 1e6; c += v; C.kind[k] += v; C.kindTok[k] += e[k]||0; C.tok[e.role][k] = (C.tok[e.role][k]||0) + (e[k]||0); }
+      C.total += c; C.role[e.role] = (C.role[e.role]||0) + c; C.models[e.role].add(e.model);
+      if (e.role === "subagent") C.agent[e.agent_type || "general-purpose"] = (C.agent[e.agent_type || "general-purpose"]||0) + c;
+      const ss = C.session[e.session] ||= {cost:0, t:0}; ss.cost += c; ss.t = Math.max(ss.t, e.t);
+      break; }
+    case "Advisor": {
+      const a = S.advisor; a.calls++; a.tokens = (a.tokens || 0) + (e.tokens_in || 0);
+      const m = S.edits === 0 ? "plan" : (a.lastErrRepeat ? "err" : "done");
+      a.moments[m]++; a.lastErrRepeat = false; a.flash = Date.now();
+      a.last = `${hms(e.t)} · ${({plan:"before a plan", err:"same error ×2", done:"before done"})[m]}\nread ${Math.round((e.tokens_in||0)/1000)}k tokens, replied ${e.tokens_out||0} tokens\n(advice text is encrypted; only Sonnet can read it)`;
+      log(e.t, "opus", "a-opus", `${({plan:"before a plan", err:"same error ×2", done:"before done"})[m]} · read ${Math.round((e.tokens_in||0)/1000)}k tokens → advice sent, back to sonnet`);
+      break; }
+    case "Decide": {
+      const c = category(e.q), sharp = e.conf != null && e.conf >= 0.8; S.forks.total++;
+      const k = S.forks.cats[c] ||= {n:0, sum:0, sharp:0}; k.n++; k.sum += e.conf || 0; if (sharp) k.sharp++;
+      log(e.t, "decider", "a-decider", `${short(e.q, 50)} → ${e.choice}   p=${e.conf ?? "?"}   ${sharp ? "sharp → code" : "split → sonnet"}`); break; }
+    case "Stop": S.mainDoing = "turn done, waiting for you"; log(e.t, "sonnet", "a-sonnet", "turn finished"); break;
+  }
+}
+
+function render() {
+  if (!S) return;
+  const now = Date.now()/1000, active = S.lastT && now - S.lastT < 20;
+  const running = Object.values(S.agents).filter(a => a.running).length;
+  $("snDoing").textContent = S.mainDoing;
+  $("snCounts").textContent = `${S.tools} tool calls · ${S.edits} edits · ${S.bash} bash · ${S.errors} errors`;
+  $("snSession").textContent = S.session ? `session ${S.session}` : "no session yet";
+  for (const id of ["w1","n1","w2"]) $(id).classList.toggle("live", !!active);
+  for (const id of ["w3","n2","w4","w5"]) $(id).classList.toggle("live", running > 0);
+  for (const id of ["n3","w6"]) $(id).classList.toggle("live", !!active && running === 0);
+  // agents
+  $("agents").innerHTML = Object.values(S.agents).map(a => {
+    const st = a.running ? `<span class="a-haiku">◐ running</span>` : (a.runs ? `<span class="dim">✓ done${a.ms ? " " + (a.ms/1000).toFixed(1) + "s" : ""}</span>` : `<span class="faint">○ idle</span>`);
+    return `<div class="box agent ${a.running||a.runs ? "" : "idle"}"><div class="nm">${esc(a.name)}</div><div class="md">${esc(pretty(a.model))}</div>
+      <div class="bar ${a.running ? "run" : ""}"><i style="width:${a.runs && !a.running ? 100 : 0}%"></i></div>
+      <div class="task">${esc(a.running ? (a.tool || a.task) : (a.result || a.task) || "–")}</div>
+      <div class="st">${st} <span class="faint">· ${a.runs} run${a.runs === 1 ? "" : "s"}</span></div>
+      <div class="cst">${S.cost.agent[a.name] ? usd(S.cost.agent[a.name]) : ""}</div></div>`;
+  }).join("");
+  // forks
+  const cats = ["which file","which tool","retry or stop","other"].filter(c => S.forks.cats[c] || c !== "other");
+  $("fkRows").innerHTML = cats.map(c => { const k = S.forks.cats[c]; const avg = k ? k.sum/k.n : 0;
+    return `<div class="fork"><span>${c}</span><div class="meter"><i style="width:${(avg*100).toFixed(0)}%"></i></div><span>${k ? avg.toFixed(2) : "–"}</span><span class="${k && k.sharp/k.n >= .5 ? "sharp" : "split"}">${k ? (k.sharp/k.n >= .5 ? "sharp" : "split") : ""}</span></div>`; }).join("");
+  $("fkTotal").textContent = S.forks.total.toLocaleString("vi-VN");
+  // opus
+  const a = S.advisor;
+  const fresh = a.flash && Date.now() - a.flash < 6000;
+  $("opState").innerHTML = fresh ? '<span class="thinking">advice sent</span>' : "on call";
+  $("opTokens").textContent = a.tokens ? `${Math.round(a.tokens/1000)}k` : "0";
+  for (const [k, id] of [["plan","m-plan"],["err","m-err"],["done","m-done"]]) { $(id).classList.toggle("hit", a.moments[k] > 0); $(id).querySelector(".n").textContent = a.moments[k] || ""; }
+  $("opCalls").textContent = a.calls; $("opErrs").textContent = S.repeated;
+  if (a.last) $("opAdvice").textContent = a.last;
+  $("bkState").textContent = running ? `waiting on ${running} subagent${running>1?"s":""}` : (active ? S.mainDoing : "–");
+  // status bar
+  const total = Object.keys(S.agents).length;
+  $("sbHaiku").textContent = running ? "[swarming]" : "[idle]";
+  $("sbSub").textContent = `[${running}/${total}]`;
+  $("sbOpus").textContent = a.busy ? "[reviewing]" : "[on call]";
+  $("sbFork").textContent = `[${S.forks.total} forks]`;
+  renderCost();
+}
+
+const usd = v => v >= 1 ? "$" + v.toFixed(2) : v >= 0.01 ? "$" + v.toFixed(3) : "$" + v.toFixed(4);
+const ktok = n => n >= 1e6 ? (n/1e6).toFixed(2) + "M" : n >= 1e3 ? Math.round(n/1e3) + "k" : String(n);
+function renderCost() {
+  const C = S.cost, tot = C.total;
+  const sumTok = r => Object.values(C.tok[r]).reduce((a,b) => a+b, 0);
+  $("cTotal").textContent = usd(tot); $("sbCost").textContent = usd(tot);
+  const ml = (r, word, dflt) => `${C.models[r].size ? [...C.models[r]].map(m => pretty(m).toLowerCase()).join(" + ") : dflt} · ${word}`;
+  $("lbMain").textContent = ml("main", "lead", pretty(CFG.model).toLowerCase()); $("lbSub").textContent = ml("subagent", "swarm", "haiku"); $("lbAdv").textContent = ml("advisor", "advisor", pretty(CFG.advisor).toLowerCase());
+  $("cMain").textContent = usd(C.role.main); $("cSub").textContent = usd(C.role.subagent); $("cAdv").textContent = usd(C.role.advisor);
+  const pct = v => tot ? ` · ${Math.round(v/tot*100)}%` : "";
+  $("cMainSub").textContent = `${ktok(sumTok("main"))} token${pct(C.role.main)}`;
+  $("cSubSub").textContent = `${ktok(sumTok("subagent"))} token${pct(C.role.subagent)}`;
+  $("cAdvSub").textContent = S.advisor.calls ? `${usd(C.role.advisor / S.advisor.calls)}/call${pct(C.role.advisor)}` : `${ktok(sumTok("advisor"))} token${pct(C.role.advisor)}`;
+  $("cTotalSub").textContent = `${Object.keys(C.session).length} session${Object.keys(C.session).length===1?"":"s"}`;
+  $("cStack").innerHTML = tot ? [["main","var(--sonnet)"],["subagent","var(--haiku)"],["advisor","var(--opus)"]]
+    .map(([r,c]) => `<i style="width:${C.role[r]/tot*100}%;background:${c}" title="${r}"></i>`).join("") : "";
+  const names = {cr:"cache read", cw1h:"cache write 1h", cw5:"cache write 5m", in:"fresh input", out:"output"};
+  $("cKinds").innerHTML = Object.entries(names).filter(([k]) => C.kindTok[k])
+    .sort((a,b) => C.kind[b[0]] - C.kind[a[0]])
+    .map(([k,n]) => `<div class="crow"><span>${n}</span><span>${ktok(C.kindTok[k])}</span><span>${usd(C.kind[k])}</span></div>`).join("") || '<div class="faint">none yet</div>';
+  const ss = Object.entries(C.session).sort((a,b) => b[1].t - a[1].t).slice(0, 6);
+  if (ss.length) $("cSessions").innerHTML = ss.map(([id,v]) => `<div class="crow"><span>${esc(id)}${id === S.session ? " ←" : ""}</span><span>${hms(v.t)}</span><span>${usd(v.cost)}</span></div>`).join("");
+  $("cNote").textContent = (C.unknown.size ? `No price for: ${[...C.unknown].join(", ")}. ` : "") +
+    "Estimated at API prices. On a monthly Claude plan this is equivalent usage, not a bill.";
+}
+
+async function loadConfig() {
+  CFG = await (await fetch("/config")).json();
+  $("snName").textContent = `${pretty(CFG.model)} · main session`; $("bkName").textContent = pretty(CFG.model);
+  $("opName").textContent = pretty(CFG.advisor).toUpperCase();
+  $("tSonnet").textContent = pretty(CFG.model).toUpperCase(); $("tOpus").textContent = pretty(CFG.advisor).split(" ")[0].toUpperCase();
+  $("lgSonnet").textContent = pretty(CFG.model).toLowerCase(); $("lgOpus").textContent = pretty(CFG.advisor).toLowerCase();
+  const hk = Object.values(CFG.agents)[0]?.model; $("hkModel").textContent = hk ? pretty(hk) : "haiku";
+  $("fkModel").textContent = CFG.decider;
+  $("btnToggle").textContent = CFG.on ? "pause logging" : "resume logging"; $("btnToggle").dataset.on = CFG.on ? "1" : "";
+}
+$("btnToggle").onclick = async () => { const on = !$("btnToggle").dataset.on; await fetch(on ? "/on" : "/off", {method:"POST"}); await loadConfig(); };
+$("btnClear").onclick = () => fetch("/clear", {method:"POST"});
+
+loadConfig().then(() => {
+  reset();
+  const es = new EventSource("/events");
+  es.onopen = () => { $("sbConn").textContent = "● live"; $("sbConn").className = "a-decider"; };
+  es.onerror = () => { $("sbConn").textContent = "● disconnected"; $("sbConn").className = "a-err"; };
+  es.addEventListener("reset", () => reset());
+  es.onmessage = m => { onEvent(JSON.parse(m.data)); render(); };
+  setInterval(render, 1000);
+});
+</script>
+</body>
+</html>

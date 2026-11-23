@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""PostToolUseFailure hook: ask Decider "retry or stop" whenever a Bash command fails,
+and hand the answer to Claude as additional context.
+
+Sharp answer (confidence >= 0.5): Claude is told the Decider's call.
+Split answer: Claude is told to decide itself. Any problem: silent, exit 0.
+"""
+import json, os, re, subprocess, sys
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+DECIDE = os.path.join(CLAUDE_DIR, "bin/decide")
+OPTIONS = ["retry_same", "fix_then_retry", "stop_and_ask"]
+SHARP = 0.8                      # below this, Claude decides with its full context
+SECRET = re.compile(r"(?i)(sk-[\w-]{8,}|(?:api[_-]?key|token|secret|password|passwd)\s*[=:]\s*\S+|Bearer\s+\S+)")
+
+def main():
+    d = json.load(sys.stdin)
+    if d.get("hook_event_name") != "PostToolUseFailure" or d.get("tool_name") != "Bash":
+        return
+    in_subagent = bool(d.get("agent_id"))
+    cmd = (d.get("tool_input") or {}).get("command", "")
+    err = d.get("error") or d.get("tool_response") or ""
+    if not isinstance(err, str):
+        err = json.dumps(err, ensure_ascii=False)
+    state = SECRET.sub("[redacted]", f"command: {cmd[:300]}\nerror: {err[-600:]}")
+    q = ("Should this failed shell command be retried as-is (transient: timeout, network, lock), "
+         "retried after fixing something (typo, missing file, wrong path or flag), "
+         "or stopped to ask the user (permissions, destructive, unclear intent)?")
+    p = subprocess.run([DECIDE, q, *OPTIONS], input=state, capture_output=True, text=True, timeout=12)
+    if p.returncode != 0:
+        return
+    r = json.loads(p.stdout)
+    conf = r.get("confidence")
+    if conf is not None and conf >= SHARP:
+        choice = r["choice"]
+        if in_subagent and choice == "stop_and_ask":
+            choice = "stop_and_report"   # a subagent cannot ask the user
+            how = "Stop retrying and report this failure back to the main session."
+        else:
+            how = "Follow it unless the error output clearly shows otherwise."
+        msg = f"Decider fork (retry or stop): {choice} (p={conf}). This is a sharp call. {how}"
+    else:
+        msg = f"Decider fork (retry or stop) was split (top: {r.get('choice')}, p={conf}); decide yourself."
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUseFailure", "additionalContext": msg}}))
+
+try:
+    main()
+except Exception:
+    pass
+sys.exit(0)

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""PreToolUse / UserPromptSubmit hook: the "which tool" fork, inline vs delegate.
+
+Counts consecutive search-like tool calls in the main session (Grep, Glob, Bash with
+grep/rg/find/ls/fd). The streak itself is the signal to delegate: on the 5th lookup
+in a row Claude gets a note to hand the rest to a subagent. Decider only answers the
+part it is good at, which subagent fits (`search` or `grep`); its probability is in
+the note so Claude can weigh it. Never blocks a tool; one note per streak; any other
+tool or a new user message resets the streak. Errors are silent.
+"""
+import json, os, re, subprocess, sys, time
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+STATE = os.environ.get("DELEGATE_STATE") or os.path.join(CLAUDE_DIR, "state/delegate_streak.json")
+DECIDE = os.path.join(CLAUDE_DIR, "bin/decide")
+STREAK = 5          # lookups in a row before the delegate note
+PICK = 0.5          # below this, name both subagents instead of one
+SEARCH_BASH = re.compile(r"(^|[|;&(]\s*|\bxargs\s+)(grep|egrep|rg|ag|find|fd|ls|tree)\b")
+SECRET = re.compile(r"(?i)(sk-[\w-]{8,}|(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+|Bearer\s+\S+)")
+QUESTION = "Which subagent fits the remaining exploration best?"
+OPTIONS = [
+    "search=map where code lives and how the repo or a module is structured; scattered lookups across files and folders",
+    "grep=find every call site or reference of one specific symbol, import or string",
+]
+
+def load():
+    try:
+        return json.load(open(STATE))
+    except Exception:
+        return {}
+
+def save(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    st = {k: v for k, v in st.items() if time.time() - v.get("t", 0) < 86400}   # drop day-old sessions
+    json.dump(st, open(STATE, "w"))
+
+def describe(tool, inp):
+    if tool == "Bash":
+        return "bash: " + inp.get("command", "")[:160]
+    return f'{tool}: ' + " ".join(f"{k}={inp[k]}" for k in ("pattern", "path", "glob", "type") if inp.get(k))[:160]
+
+def main():
+    d = json.load(sys.stdin)
+    if d.get("agent_id"):
+        return
+    ev, sid = d.get("hook_event_name"), d.get("session_id", "")
+    st = load()
+    s = st.get(sid, {"n": 0, "recent": [], "nudged": False})
+    s["t"] = time.time()
+    tool, inp = d.get("tool_name", ""), d.get("tool_input") or {}
+    is_search = tool in ("Grep", "Glob") or (tool == "Bash" and SEARCH_BASH.search(inp.get("command", "")))
+    if ev != "PreToolUse" or not is_search:
+        st[sid] = {"n": 0, "recent": [], "nudged": False, "t": time.time()}
+        save(st)
+        return
+    s["n"] += 1
+    s["recent"] = (s["recent"] + [describe(tool, inp)])[-5:]
+    out = None
+    if s["n"] >= STREAK and not s["nudged"]:
+        s["nudged"] = True
+        state = SECRET.sub("[redacted]", "Recent lookups:\n" + "\n".join(s["recent"]))
+        pick = "`search` or `grep`"
+        try:
+            p = subprocess.run([DECIDE, QUESTION, *OPTIONS], input=state, capture_output=True, text=True, timeout=12)
+            r = json.loads(p.stdout) if p.returncode == 0 else {}
+            if r.get("confidence") is not None and r["confidence"] >= PICK:
+                pick = f"`{r['choice']}` (Decider p={r['confidence']})"
+        except Exception:
+            pass
+        out = (f"Decider fork (which tool): you've made {s['n']} inline lookups in a row. Unless the next "
+               f"lookup finishes the job, hand the rest of this exploration to the {pick} subagent "
+               f"and keep only its summary.")
+    st[sid] = s
+    save(st)
+    if out:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": out}}))
+
+try:
+    main()
+except Exception:
+    pass
+sys.exit(0)

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# agent-monitor [stop]: live view of Sonnet / Haiku / Decider / Opus at http://localhost:8790
+if [ "$1" = stop ]; then pkill -f "monitor/server.py --port 8790" && echo stopped; exit 0; fi
+curl -s localhost:8790/config >/dev/null && { echo "already running: http://localhost:8790"; exit 0; }
+D="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+nohup python3 -I "$D/monitor/server.py" --port 8790 > "$D/monitor/server.log" 2>&1 &
+sleep 0.5; echo "agent monitor: http://localhost:8790   (stop: agent-monitor stop)"

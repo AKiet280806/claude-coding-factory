@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Stop hook: "Prove It Works" as a gate.
+
+If, since the user's last message, the main session edited a code file and ran no
+test afterwards, block the stop once and ask for verification (or an explanation of
+why it can't be verified). Never blocks twice in a row (stop_hook_active), never
+blocks for docs/config edits, and any error lets the stop through.
+"""
+import json, os, re, sys
+
+CODE_EXT = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java",
+            ".kt", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".swift",
+            ".scala", ".sh", ".lua", ".dart", ".vue", ".svelte"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+TEST_CMD = re.compile(
+    r"\b(pytest|py\.test|unittest|tox|nox|npm (run )?test|pnpm (run )?test|yarn (run )?test|"
+    r"bun test|deno test|vitest|jest|mocha|playwright test|go test|cargo (test|nextest)|"
+    r"make (test|check)|ctest|mvn (test|verify)|gradle\w* test|dotnet test|rspec|phpunit|"
+    r"swift test|mix test)\b")
+
+def is_user_prompt(rec):
+    if rec.get("type") != "user" or rec.get("isSidechain") or rec.get("isMeta"):
+        return False
+    c = (rec.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return not c.startswith("<")            # skip task notifications, command output
+    if isinstance(c, list):
+        return any(b.get("type") == "text" and not b.get("text", "").startswith("<") for b in c)
+    return False
+
+def main():
+    d = json.load(sys.stdin)
+    if d.get("hook_event_name") != "Stop" or d.get("stop_hook_active"):
+        return
+    path = d.get("transcript_path")
+    if not path or not os.path.exists(path):
+        return
+    recs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                recs.append(json.loads(line))
+            except ValueError:
+                pass
+    start = max((i for i, r in enumerate(recs) if is_user_prompt(r)), default=-1)
+    last_edit, last_test, edited = -1, -1, []
+    for i, r in enumerate(recs[start + 1:], start + 1):
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        for b in (r.get("message") or {}).get("content") or []:
+            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                continue
+            name, inp = b.get("name"), b.get("input") or {}
+            if name in EDIT_TOOLS:
+                fp = inp.get("file_path") or inp.get("notebook_path") or ""
+                if os.path.splitext(fp)[1].lower() in CODE_EXT:
+                    last_edit = i
+                    edited.append(os.path.basename(fp))
+            elif name == "Bash" and TEST_CMD.search(inp.get("command", "")):
+                last_test = i
+            elif name in ("Agent", "Task") and inp.get("subagent_type") == "test":
+                last_test = i
+    if last_edit >= 0 and last_test < last_edit:
+        files = ", ".join(sorted(set(edited))[:5])
+        print(json.dumps({"decision": "block", "reason":
+            f"done-gate: code changed ({files}) but no test ran after the last edit. "
+            "Prove it works before finishing: run the relevant tests (or the `test` subagent) "
+            "and report the command and result. If it cannot be tested, say exactly why and "
+            "what was verified instead, then finish."}))
+
+try:
+    main()
+except Exception:
+    pass
+sys.exit(0)
