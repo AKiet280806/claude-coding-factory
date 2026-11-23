@@ -47,7 +47,7 @@ computed from transcripts at API prices.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/claude-coding-factory
+git clone https://github.com/AKiet280806/claude-coding-factory
 cd claude-coding-factory
 python3 install.py --dry-run      # review every change as a diff
 python3 install.py                # install; backs up what it touches
