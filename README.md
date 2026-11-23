@@ -122,6 +122,16 @@ python3 uninstall.py --reset-models --purge-key   # remove those too
 - The advisor's advice text is encrypted, so the monitor shows when Opus was called
   and how many tokens it read, not what it said.
 
+## Development
+
+```bash
+python3 -m pytest -q          # install/uninstall round trips in a throwaway HOME
+```
+
+The tests check the dry run, idempotent re-install, that your own hooks, agents,
+permissions and CLAUDE.md rules survive, that `decider.env` is never overwritten, that
+uninstall restores the original settings, and that every installed hook runs quietly.
+
 ## Credits
 
 The Factory principles are an adaptation of ideas from **Lauren Tan (poteto)** as
