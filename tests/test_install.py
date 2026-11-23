@@ -94,10 +94,3 @@ def test_installed_hooks_run_quietly(tmp_path):
                            env=env, capture_output=True, text=True)
         assert p.returncode == 0 and p.stdout == "", (script, p.stdout, p.stderr)
 
-
-def test_demo_events_generator(tmp_path):
-    subprocess.run([sys.executable, "-I", str(ROOT / "docs" / "make_demo_events.py"), str(tmp_path)],
-                   check=True, capture_output=True)
-    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    kinds = {e["ev"] for e in events}
-    assert {"Usage", "Advisor", "Decide", "SubagentStart", "SubagentStop", "PostToolUseFailure"} <= kinds
