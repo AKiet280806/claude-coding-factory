@@ -32,9 +32,9 @@ An optional live monitor (`agent-monitor`, http://localhost:8790) shows the lead
 the Haiku swarm, Decider forks and Opus calls as they happen, with cost per role
 computed from transcripts at API prices.
 
-![Agent monitor showing the Sonnet lead, Decider fork layer, four Haiku subagents, Opus advisor and cost per role](docs/monitor-live.jpg)
+![Agent monitor showing the Sonnet lead, Decider fork layer, four Haiku subagents, Opus advisor and cost per role](docs/monitor-live.png)
 
-*Screenshot of a real run across several sessions; home paths are shown as `~` and the user's own prompts and other projects' output are blurred.*
+*Screenshot of a real run across six sessions (2400 px wide). Task descriptions, your own prompts and other projects' output are never shown: subagent cards show a generic label and the log keeps only who handed work to whom, Decider forks and Opus calls.*
 
 ## Requirements
 
