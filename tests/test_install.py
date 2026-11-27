@@ -44,13 +44,15 @@ def test_install_twice_is_idempotent_and_keeps_user_config(tmp_path):
     assert commands(s, "Stop") == ["my-stop-hook.sh",
                                    "python3 -I ~/.claude/monitor/hook.py",
                                    "python3 -I ~/.claude/bin/done-gate"]
+    pre = [(g.get("matcher"), h["command"]) for g in s["hooks"]["PreToolUse"] for h in g["hooks"]]
+    assert pre.count(("Bash", "python3 -I ~/.claude/bin/guard-hook")) == 1
     assert s["theme"] == "dark"
     assert s["model"] == "claude-sonnet-5-5" and s["advisorModel"] == "claude-opus-5-5"
     assert s["permissions"]["allow"] == ["Bash(ls:*)", "Bash(~/.claude/bin/decide:*)"]
     md = (cd / "CLAUDE.md").read_text()
     assert "Always use tabs." in md and md.count("coding-factory:start") == 1
     assert oct((cd / "decider.env").stat().st_mode & 0o777) == "0o600"
-    for f in ("decide", "decide-hook", "delegate-hook", "done-gate", "agent-monitor"):
+    for f in ("decide", "decide-hook", "delegate-hook", "done-gate", "guard-hook", "agent-monitor"):
         assert os.access(cd / "bin" / f, os.X_OK), f
 
 
@@ -89,6 +91,7 @@ def test_installed_hooks_run_quietly(tmp_path):
                                    "tool_name": "Grep", "tool_input": {"pattern": "x"}}),
             ("bin/decide-hook", {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
                                  "tool_input": {"command": "x"}, "error": "boom"}),
+            ("bin/guard-hook", {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}),
             ("monitor/hook.py", {"hook_event_name": "Stop"})):
         p = subprocess.run([sys.executable, "-I", str(cd / script)], input=json.dumps(payload),
                            env=env, capture_output=True, text=True)

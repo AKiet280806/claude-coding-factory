@@ -11,7 +11,7 @@ import argparse, json, os, shutil, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from install import START, END, MODELS, claude_dir, plan_files, shown, udiff  # noqa: E402
 
-OUR_CMDS = ("/monitor/hook.py", "/bin/decide-hook", "/bin/delegate-hook", "/bin/done-gate")
+OUR_CMDS = ("/monitor/hook.py", "/bin/decide-hook", "/bin/delegate-hook", "/bin/done-gate", "/bin/guard-hook")
 
 
 def main():

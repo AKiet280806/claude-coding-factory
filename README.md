@@ -21,6 +21,10 @@ Sonnet 5.5 · lead ──► builds, edits, runs the plan
 
 done-gate (Stop hook): code changed but no test ran? The turn can't end until
 Claude verifies, or says exactly why it can't.
+
+guard-hook (PreToolUse on Bash): force push, recursive deletes, DROP TABLE, deploys,
+curl | sh and similar pause for your approval. Decider judges the gray cases
+(rm, kill, docker rm ...). It only ever asks or denies; it never approves.
 ```
 
 Rules live in `~/.claude/CLAUDE.md` as **Factory principles**, adapted from
@@ -94,6 +98,7 @@ python3 uninstall.py --reset-models --purge-key   # remove those too
 | `bin/decide-hook` | `PostToolUseFailure`: retry-or-stop note after a failed Bash command |
 | `bin/delegate-hook` | `PreToolUse`/`UserPromptSubmit`: delegate note after 5 searches in a row |
 | `bin/done-gate` | `Stop`: blocks once if code changed and no test ran after it |
+| `bin/guard-hook` | `PreToolUse` on Bash: asks before hard-to-reverse commands, denies a tiny catastrophic set (`rm -rf /`, `dd` onto a disk), asks Decider about gray cases. `CLAUDE_GUARD=off` switches it off for a session; one regex per line in `~/.claude/guard.allow` allows known-safe commands (never overrides a deny) |
 | `bin/agent-monitor` | starts/stops the live monitor (`agent-monitor stop`) |
 | `monitor/` | event hook, server, UI and price table for the monitor |
 | `skills/research-playbook/` | research and experiment playbook (sources, labels, counterexamples) |
@@ -101,8 +106,8 @@ python3 uninstall.py --reset-models --purge-key   # remove those too
 
 ## Privacy and cost notes
 
-- Decider hooks send a short, redacted snippet (the failed command and its error, or
-  recent search patterns) to OpenRouter or Perplexity. Turn Decider off for a
+- Decider hooks send a short, redacted snippet (the failed command and its error,
+  recent search patterns, or a gray-area shell command) to OpenRouter or Perplexity. Turn Decider off for a
   sensitive project by leaving the key empty, or remove the two hooks.
 - Free `:free` models on OpenRouter may have rate limits and their own data policy.
   Check your OpenRouter privacy settings.
@@ -117,6 +122,9 @@ python3 uninstall.py --reset-models --purge-key   # remove those too
   its own reasoning, before any hook runs. Only retry-or-stop and
   inline-vs-delegate are automated.
 - `audit` needs a git repository (it runs in a worktree).
+- `guard-hook` is a heuristic safety net, not a sandbox: it reads the command text, so a script
+  that deletes things internally, or an unusual spelling, can slip past it. A hook "ask" goes to
+  your normal permission prompt; behaviour under bypass-permissions mode is untested.
 - `done-gate` accepts any test command; it can't tell whether the test was the
   relevant one.
 - The advisor's advice text is encrypted, so the monitor shows when Opus was called
@@ -128,7 +136,8 @@ python3 uninstall.py --reset-models --purge-key   # remove those too
 python3 -m pytest -q          # install/uninstall round trips in a throwaway HOME
 ```
 
-The tests check the dry run, idempotent re-install, that your own hooks, agents,
+The tests check a table of 146 shell commands against the guard (safe, ask, deny and gray),
+the guard hook's output and escape hatches, the dry run, idempotent re-install, that your own hooks, agents,
 permissions and CLAUDE.md rules survive, that `decider.env` is never overwritten, that
 uninstall restores the original settings, and that every installed hook runs quietly.
 

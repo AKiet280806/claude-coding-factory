@@ -271,6 +271,7 @@ function onEvent(e) {
       a.last = `${hms(e.t)} · ${({plan:"before a plan", err:"same error ×2", done:"before done"})[m]}\nread ${Math.round((e.tokens_in||0)/1000)}k tokens, replied ${e.tokens_out||0} tokens\n(advice text is encrypted; only Sonnet can read it)`;
       log(e.t, "opus", "a-opus", `${({plan:"before a plan", err:"same error ×2", done:"before done"})[m]} · read ${Math.round((e.tokens_in||0)/1000)}k tokens → advice sent, back to sonnet`);
       break; }
+    case "Guard": log(e.t, "guard", "a-err", `${e.verdict}: ${e.reason}${e.source === "decider" ? " (Decider)" : ""}`); break;
     case "Decide": {
       const c = category(e.q), sharp = e.conf != null && e.conf >= 0.8; S.forks.total++;
       const k = S.forks.cats[c] ||= {n:0, sum:0, sharp:0}; k.n++; k.sum += e.conf || 0; if (sharp) k.sharp++;

@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""PreToolUse hook for Bash: pause before hard-to-reverse commands.
+
+Layers, cheapest first:
+  deny  a tiny catastrophic set (rm -rf /, mkfs/dd onto a disk, fork bomb)
+  ask   clearly risky commands: recursive deletes outside generated dirs, force push,
+        hard reset, DROP TABLE, publish/deploy, curl | sh, sudo, writes to /etc ...
+  gray  usually fine, sometimes destructive (rm, find -delete, kill, docker rm ...):
+        Decider judges high- vs low-impact
+  ok    everything else: no output, no delay
+
+"ask" hands the call to your normal permission prompt; this hook never approves
+anything. Escape hatches: CLAUDE_GUARD=off for a session, or one regex per line in
+~/.claude/guard.allow (never overrides "deny"). Errors always let the command through.
+"""
+import json, os, re, shlex, subprocess, sys, time
+
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+DECIDE = os.path.join(CLAUDE_DIR, "bin", "decide")
+ALLOW_FILE = os.path.join(CLAUDE_DIR, "guard.allow")
+RANK = {"ok": 0, "gray": 1, "ask": 2, "deny": 3}
+PUNCT = set("();<>|&")
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+INTERP = SHELLS | {"python", "python3", "perl", "ruby", "node", "sudo"}
+RESERVED = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case",
+            "esac", "{", "}", "!", "function"}
+SAFE_DIRS = {"node_modules", "dist", "build", "out", ".next", ".nuxt", ".turbo", ".cache",
+             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "target", "coverage",
+             ".parcel-cache", ".gradle", ".tox", ".venv", "venv", ".eggs"}
+TEMP = ("/tmp/", "/var/tmp/", "/dev/shm/", "$TMPDIR/", "${TMPDIR}/", "~/.cache/", "$HOME/.cache/")
+SYSTEM = ("/etc/", "/usr/", "/bin/", "/sbin/", "/boot/", "/lib/", "/lib64/", "/sys/", "/dev/sd", "/dev/nvme")
+FORK_BOMB = re.compile(r":\s*\(\s*\)\s*\{[^}]*:\s*\|\s*:\s*&")
+SQL_BAD = re.compile(r"\b(?:drop\s+(?:table|database|schema|index)\b|truncate\s+(?:table\s+)?\w"
+                     r"|delete\s+from\s+[^\s;]+\s*(?:;|\"|'|$)|flushall\b|flushdb\b)", re.I)
+DB_CLIENTS = {"psql", "mysql", "mariadb", "sqlite3", "mongosh", "mongo", "redis-cli", "cqlsh",
+              "clickhouse-client", "duckdb", "sqlcmd"}
+WEBHOOKS = re.compile(r"hooks\.slack\.com|discord(app)?\.com/api/webhooks|api\.telegram\.org/bot|outlook\.office\.com/webhook")
+SECRET = re.compile(r"(?i)(sk-[\w-]{8,}|(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+|Bearer\s+\S+)")
+CLOUD_BAD = re.compile(r"\b(delete|destroy|terminate|remove|purge|rb)\b")
+ARG_OPTS = {"sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"}, "doas": {"-u", "-C"},
+            "xargs": {"-n", "-L", "-P", "-I", "-d", "-E", "-s", "-a"}, "nice": {"-n"},
+            "ionice": {"-c", "-n", "-p"}, "env": {"-u", "-C", "-S"}, "timeout": {"-s", "-k"},
+            "stdbuf": {"-i", "-o", "-e"}}
+
+
+def worse(a, b):
+    return b if RANK[b[0]] > RANK[a[0]] else a
+
+
+# ------------------------------------------------------------------ parsing
+def strip_heredocs(cmd):
+    pat = re.compile(r"(<<-?\s*(['\"]?)(\w+)\2)([^\n]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)", re.S)
+    return pat.sub(lambda m: m.group(4), cmd)
+
+
+def match_paren(s, i):
+    depth, n = 0, len(s)
+    while i < n:
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n - 1
+
+
+def flatten(cmd):
+    """Newlines -> ' ; ', comments dropped, $(..) and `..` pulled out as sub-commands."""
+    out, subs, i, q, n = [], [], 0, None, len(cmd)
+    while i < n:
+        c = cmd[i]
+        nxt = cmd[i + 1:i + 2]
+        if q == "'":
+            out.append(c)
+            if c == "'":
+                q = None
+        elif q == '"':
+            if c == "\\" and nxt:
+                out.append(c + nxt)
+                i += 1
+            elif c == '"':
+                out.append(c)
+                q = None
+            elif c == "$" and nxt == "(":
+                j = match_paren(cmd, i + 1)
+                subs.append(cmd[i + 2:j])
+                out.append("__SUBST__")
+                i = j
+            elif c == "`":
+                j = cmd.find("`", i + 1)
+                j = n - 1 if j < 0 else j
+                subs.append(cmd[i + 1:j])
+                out.append("__SUBST__")
+                i = j
+            else:
+                out.append(c)
+        else:
+            last = out[-1][-1] if out else " "
+            if c == "\\" and nxt:
+                if nxt == "\n":
+                    i += 1
+                else:
+                    out.append(c + nxt)
+                    i += 1
+            elif c in "'\"":
+                q = c
+                out.append(c)
+            elif c == "$" and nxt == "(" and cmd[i + 2:i + 3] != "(":
+                j = match_paren(cmd, i + 1)
+                subs.append(cmd[i + 2:j])
+                out.append("__SUBST__")
+                i = j
+            elif c == "`":
+                j = cmd.find("`", i + 1)
+                j = n - 1 if j < 0 else j
+                subs.append(cmd[i + 1:j])
+                out.append("__SUBST__")
+                i = j
+            elif c == "#" and last in " \t;|&(":
+                while i < n and cmd[i] != "\n":
+                    i += 1
+                continue
+            elif c == "\n":
+                out.append(" ; ")
+            else:
+                out.append(c)
+        i += 1
+    return "".join(out), subs
+
+
+def tokenize(s):
+    lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    return list(lex)
+
+
+def segment(toks):
+    segs, cur, redirs, op, i = [], [], [], ";", 0
+
+    def flush(next_op):
+        nonlocal cur, redirs, op
+        if cur or redirs:
+            segs.append({"argv": cur, "redirs": redirs, "op": op})
+        cur, redirs, op = [], [], next_op
+
+    while i < len(toks):
+        t = toks[i]
+        if t and set(t) <= PUNCT:
+            if "<" in t or ">" in t:
+                redirs.append((t, toks[i + 1] if i + 1 < len(toks) else ""))
+                i += 2
+                continue
+            flush(t)
+        else:
+            cur.append(t)
+        i += 1
+    flush(";")
+    return segs
+
+
+def flags_of(args):
+    short, long_, pos, rest = set(), set(), [], False
+    for a in args:
+        if rest or a == "-" or not a.startswith("-"):
+            pos.append(a)
+        elif a == "--":
+            rest = True
+        elif a.startswith("--"):
+            long_.add(a[2:].split("=")[0])
+        else:
+            short |= set(a[1:])
+    return short, long_, pos
+
+
+def first_pos(args):
+    for a in args:
+        if not a.startswith("-"):
+            return a
+    return ""
+
+
+# ------------------------------------------------------------------ rules
+def safe_target(t):
+    t = t.rstrip("/")
+    if not t:
+        return False
+    if any((t + "/").startswith(p) and t + "/" != p for p in TEMP):
+        return True
+    base = os.path.basename(t)
+    return base in SAFE_DIRS or base.endswith((".egg-info", ".pyc")) or base == "__pycache__"
+
+
+def catastrophic(t):
+    t = t.rstrip("/") or "/"
+    if t in {"/", "~", "$HOME", "${HOME}", "/*", "~/*", "$HOME/*", "${HOME}/*"}:
+        return True
+    return bool(re.fullmatch(r"/(etc|usr|bin|sbin|boot|lib|lib64|var|opt|home|root|sys|proc|dev|srv|mnt)(/\*)?", t))
+
+
+def is_system_path(p):
+    return p.startswith(SYSTEM) or p in {"/etc", "/usr", "/boot", "/bin", "/sbin"}
+
+
+def git_verdict(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
+    sub = args[i] if i < len(args) else ""
+    rest = args[i + 1:]
+    short, long_, pos = flags_of(rest)
+    if sub == "push":
+        if short & {"f"} or {"force", "force-with-lease", "mirror"} & long_ or any(a.startswith("+") for a in pos):
+            return ("ask", "force push rewrites remote history")
+        if short & {"d"} or "delete" in long_ or any(a.startswith(":") for a in pos):
+            return ("ask", "deletes a remote branch or tag")
+    elif sub == "reset" and ("hard" in long_ or "merge" in long_):
+        return ("ask", "git reset --hard discards uncommitted work")
+    elif sub == "clean" and (short & {"f"} or "force" in long_) and not (short & {"n"} or "dry-run" in long_):
+        return ("ask", "git clean deletes untracked files")
+    elif sub == "checkout" and ("--" in rest or "." in pos) and not (short & {"b", "B"}):
+        return ("ask", "git checkout discards uncommitted changes")
+    elif sub == "restore" and not ("staged" in long_ and "worktree" not in long_):
+        return ("ask", "git restore discards working-tree changes")
+    elif sub == "branch" and ("D" in short or ("delete" in long_ and "force" in long_)):
+        return ("ask", "git branch -D deletes unmerged work")
+    elif sub == "stash" and first_pos(rest) in ("drop", "clear"):
+        return ("ask", "drops stashed work")
+    elif sub in ("filter-branch", "filter-repo"):
+        return ("ask", "rewrites repository history")
+    elif sub == "reflog" and first_pos(rest) == "expire":
+        return ("ask", "expires the reflog, your safety net")
+    elif sub == "gc" and any("prune=now" in a for a in rest):
+        return ("ask", "prunes unreachable objects immediately")
+    return ("ok", "")
+
+
+def cmd_verdict(name, args, via_xargs=False):
+    joined = " ".join(args)
+    short, long_, pos = flags_of(args)
+    sub = first_pos(args)
+    if {"help", "version"} & long_ or args[:1] in (["-h"], ["-V"]):
+        return ("ok", "")
+    if name == "rm":
+        if "no-preserve-root" in long_:
+            return ("deny", "rm --no-preserve-root")
+        rec = bool(short & {"r", "R"}) or "recursive" in long_
+        if via_xargs and not pos:
+            pos = ["<xargs-input>"]
+        if not pos:
+            return ("ok", "")
+        if rec:
+            if any(catastrophic(t) for t in pos):
+                return ("deny", "rm -r on the filesystem root, your home or a system directory")
+            if any(t in (".", "..", "*", ".*", "./", "../", "./*") for t in pos):
+                return ("ask", "recursive delete of the current or parent directory")
+            unsafe = [t for t in pos if not safe_target(t)]
+            if not unsafe:
+                return ("ok", "")
+            if all("$" in t or "__SUBST__" in t for t in unsafe):
+                return ("gray", "recursive delete of a computed path")
+            return ("ask", f"recursive delete of {unsafe[0]}")
+        unsafe = [t for t in pos if not safe_target(t)]
+        if not unsafe:
+            return ("ok", "")
+        if any(t in ("*", ".*", "./*") for t in unsafe):
+            return ("ask", "deletes every file in the directory")
+        return ("gray", f"deletes {unsafe[0]}")
+    if name == "git":
+        return git_verdict(args)
+    if name in DB_CLIENTS and SQL_BAD.search(joined):
+        return ("ask", "destructive SQL (drop / truncate / delete without where)")
+    if name == "dd" and any(a.startswith("of=/dev/") and a not in ("of=/dev/null", "of=/dev/zero") for a in args):
+        return ("deny", "dd onto a block device")
+    if (name.startswith("mkfs") or name in ("mke2fs", "wipefs", "fdisk", "parted", "sgdisk", "blkdiscard")) \
+            and any(a.startswith("/dev/") for a in args):
+        return ("deny", f"{name} on a block device")
+    if name == "shred":
+        return ("deny", "shred on a device") if any(a.startswith("/dev/") for a in args) else ("ask", "shred destroys files for good")
+    if name in ("chmod", "chown", "chgrp") and (short & {"R"} or "recursive" in long_) and any(catastrophic(t) for t in pos):
+        return ("ask", f"recursive {name} on a system or home directory")
+    if name in ("cp", "mv", "install", "ln", "tee", "truncate") and any(is_system_path(a) for a in args):
+        return ("ask", "writes into a system directory")
+    if name == "sed" and ("i" in short or "in-place" in long_) and any(is_system_path(a) for a in args):
+        return ("ask", "edits a system file in place")
+    if name == "rsync" and any(a.startswith("--delete") for a in args):
+        return ("ask", "rsync --delete removes files at the destination")
+    if name == "crontab" and "r" in short:
+        return ("ask", "removes your crontab")
+    if name in ("npm", "pnpm", "yarn", "bun") and sub in ("publish", "unpublish"):
+        return ("ask", f"{name} {sub} publishes or removes a public package")
+    if name == "cargo" and sub in ("publish", "yank"):
+        return ("ask", "cargo publish is irreversible")
+    if name in ("twine", "poetry") and sub in ("upload", "publish"):
+        return ("ask", "uploads a package to a public index")
+    if name == "gem" and sub in ("push", "yank"):
+        return ("ask", "publishes or yanks a gem")
+    if name == "gh":
+        rest = [a for a in args if not a.startswith("-")]
+        group, action = (rest + ["", ""])[:2]
+        if (group, action) in {("repo", "create"), ("repo", "delete"), ("repo", "edit"), ("repo", "rename"),
+                               ("repo", "archive"), ("release", "create"), ("release", "delete"),
+                               ("pr", "merge"), ("pr", "close"), ("pr", "comment"), ("pr", "review"),
+                               ("pr", "create"), ("pr", "edit"), ("issue", "comment"), ("issue", "create"),
+                               ("issue", "close"), ("issue", "delete"), ("workflow", "run")}:
+            return ("ask", f"gh {group} {action} acts on GitHub, visible to others")
+        if group == "api" and (re.search(r"-X\s*(POST|PUT|PATCH|DELETE)|--method\s*(POST|PUT|PATCH|DELETE)", joined, re.I)):
+            return ("ask", "gh api write call")
+    if name == "vercel" and (sub in ("", "deploy", "promote", "rollback", "remove", "rm") or "prod" in long_):
+        return ("ask", "vercel deploy / promote / remove")
+    if name in ("netlify", "fly", "flyctl", "firebase", "wrangler", "serverless", "sls", "sam", "cdk", "pulumi") \
+            and sub in ("deploy", "publish", "destroy", "delete", "up", "remove"):
+        return ("ask", f"{name} {sub} changes a live deployment")
+    if name == "terraform" and sub in ("apply", "destroy"):
+        return ("ask", f"terraform {sub} changes real infrastructure")
+    if name in ("kubectl", "helm", "oc") and sub in ("delete", "apply", "replace", "install", "upgrade", "uninstall", "scale", "rollout"):
+        return ("ask", f"{name} {sub} changes a cluster")
+    if name == "docker":
+        if sub == "system" and "prune" in args or sub in ("volume", "network", "container", "image") and "prune" in args \
+                or sub == "volume" and "rm" in args:
+            return ("ask", "docker prune / volume rm deletes data")
+        if sub == "push":
+            return ("ask", "docker push publishes an image")
+        if sub in ("rm", "rmi", "stop", "kill"):
+            return ("gray", f"docker {sub}")
+    if name in ("aws", "gcloud", "az", "doctl", "heroku") and CLOUD_BAD.search(joined):
+        return ("ask", f"{name} command that deletes or terminates cloud resources")
+    if name in ("mail", "mailx", "sendmail", "mutt", "msmtp", "swaks"):
+        return ("ask", "sends email")
+    if name in ("curl", "wget", "http", "https", "xh") and WEBHOOKS.search(joined):
+        return ("ask", "posts to a chat webhook")
+    if name in ("apt", "apt-get", "dnf", "yum", "pacman", "zypper", "snap", "flatpak", "brew") \
+            and (sub in ("remove", "purge", "autoremove", "uninstall", "erase", "-R", "-Rs") or "R" in short and name == "pacman"):
+        return ("ask", f"{name} {sub} removes installed software")
+    if name == "find" and ("delete" in long_ or "-delete" in args or ("-exec" in args and any(a in ("rm", "shred") for a in args))):
+        return ("gray", "find that deletes files")
+    if name in ("kill", "pkill", "killall"):
+        if name == "kill" and "-1" in args and ("9" in short or any(a in ("-9", "-KILL") for a in args)):
+            return ("ask", "kill -9 -1 kills every process you own")
+        return ("gray", f"{name} stops processes")
+    if name == "truncate":
+        return ("gray", "truncate empties files")
+    return ("ok", "")
+
+
+def strip_prefix(argv):
+    while argv and (argv[0] in RESERVED or re.match(r"^\w+=", argv[0])):
+        argv = argv[1:]
+    return argv
+
+
+def unwrap(argv, depth):
+    verdict, via_xargs = ("ok", ""), False
+    while argv:
+        name = os.path.basename(argv[0])
+        if name in ("sudo", "doas"):
+            verdict = worse(verdict, ("ask", "runs with elevated privileges"))
+        elif name == "xargs":
+            via_xargs = True
+        elif name not in ("env", "command", "nohup", "time", "nice", "ionice", "stdbuf", "exec", "builtin",
+                          "setsid", "timeout", "chrt"):
+            break
+        rest, i = argv[1:], 0
+        while i < len(rest) and (rest[i].startswith("-") or re.match(r"^\w+=", rest[i])):
+            i += 2 if rest[i] in ARG_OPTS.get(name, ()) else 1
+        if name in ("timeout", "nice", "chrt") and i < len(rest) and re.match(r"^[\d.]+[smhd]?$", rest[i]):
+            i += 1
+        argv = strip_prefix(rest[i:])
+    return verdict, argv, via_xargs
+
+
+def check_segment(seg, depth):
+    best = ("ok", "")
+    for op, target in seg["redirs"]:
+        if ">" in op and is_system_path(target):
+            raw_dev = target.startswith(("/dev/sd", "/dev/nvme"))
+            best = worse(best, ("deny" if raw_dev else "ask", f"writes to {target}"))
+    argv = strip_prefix(seg["argv"])
+    if not argv:
+        return best
+    v, argv, via_xargs = unwrap(argv, depth)
+    best = worse(best, v)
+    if not argv:
+        return best
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if name in SHELLS and depth < 3:
+        for k, a in enumerate(args):
+            if a.startswith("-") and not a.startswith("--") and "c" in a and k + 1 < len(args):
+                best = worse(best, classify(args[k + 1], depth + 1))
+                break
+    return worse(best, cmd_verdict(name, args, via_xargs))
+
+
+def classify(cmd, depth=0):
+    raw = cmd[:20000]
+    if FORK_BOMB.search(raw):
+        return ("deny", "fork bomb")
+    try:
+        flat, subs = flatten(strip_heredocs(raw))
+        segs = segment(tokenize(flat))
+    except Exception:
+        return fallback(raw)
+    best = ("ok", "")
+    if depth < 3:
+        for sub in subs[:8]:
+            best = worse(best, classify(sub, depth + 1))
+    for i, seg in enumerate(segs):
+        best = worse(best, check_segment(seg, depth))
+        if seg["op"] in ("|", "|&") and i > 0 and seg["argv"] and segs[i - 1]["argv"]:
+            if os.path.basename(strip_prefix(seg["argv"])[0] if strip_prefix(seg["argv"]) else "") in INTERP \
+                    and os.path.basename(segs[i - 1]["argv"][0]) in ("curl", "wget"):
+                best = worse(best, ("ask", "pipes a download straight into an interpreter"))
+    return best
+
+
+def fallback(raw):
+    """Unparseable command: only the loudest patterns, everything else passes."""
+    if re.search(r"\brm\s+(-\w*[rR]\w*|--recursive)\b", raw):
+        return ("ask", "recursive rm (command could not be parsed)")
+    if re.search(r"\bgit\s+push\b.*(\s-f\b|--force)|\bgit\s+reset\s+--hard\b", raw):
+        return ("ask", "force push or hard reset (command could not be parsed)")
+    if SQL_BAD.search(raw):
+        return ("ask", "destructive SQL (command could not be parsed)")
+    return ("ok", "")
+
+
+# ------------------------------------------------------------------ decisions
+def allowed(cmd):
+    try:
+        for line in open(ALLOW_FILE, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and re.search(line, cmd):
+                return True
+    except (OSError, re.error):
+        pass
+    return False
+
+
+def judge_gray(cmd, reason):
+    if os.environ.get("GUARD_DECIDER", "").lower() == "off" or not os.path.exists(DECIDE):
+        return None
+    state = SECRET.sub("[redacted]", f"command: {cmd[:600]}\nflagged because: {reason}")
+    q = ("Could running this shell command irreversibly destroy or overwrite data, or affect other people, "
+         "remote systems or the machine outside the project? Or does it only touch temporary, generated or "
+         "easily recovered files, or is it a normal development action?")
+    opts = ["low_impact=only temporary, generated or easily recovered files; or a normal development action",
+            "high_impact=could irreversibly delete or overwrite data, or affects other people, remote systems or the machine outside the project"]
+    try:
+        p = subprocess.run([DECIDE, q, *opts], input=state, capture_output=True, text=True, timeout=9)
+        r = json.loads(p.stdout) if p.returncode == 0 else {}
+    except Exception:
+        return None
+    conf = r.get("confidence")
+    if r.get("choice") == "high_impact" and conf is not None and conf >= 0.6:
+        return ("ask", f"Decider rates this high-impact (p={conf}): {reason}")
+    return None
+
+
+def log_event(verdict, reason, source, cmd):
+    mdir = os.path.join(CLAUDE_DIR, "monitor")
+    if not os.path.exists(os.path.join(mdir, "on")):
+        return
+    ev = {"t": time.time(), "ev": "Guard", "verdict": verdict, "reason": reason, "source": source,
+          "cmd": SECRET.sub("[redacted]", " ".join(cmd.split()))[:90]}
+    with open(os.path.join(mdir, "events.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+def emit(decision, reason):
+    tail = " Run it yourself in a terminal if you really mean it." if decision == "deny" else " Approve only if this is intended."
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                                              "permissionDecisionReason": f"guard: {reason}.{tail}"}}))
+
+
+def main():
+    if os.environ.get("CLAUDE_GUARD", "").lower() == "off":
+        return
+    d = json.load(sys.stdin)
+    if d.get("hook_event_name") != "PreToolUse" or d.get("tool_name") != "Bash":
+        return
+    cmd = (d.get("tool_input") or {}).get("command", "")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return
+    verdict, reason = classify(cmd)
+    source = "rules"
+    if verdict in ("ask", "gray") and allowed(cmd):
+        verdict = "ok"
+    if verdict == "gray":
+        j = judge_gray(cmd, reason)
+        verdict, reason, source = (j[0], j[1], "decider") if j else ("ok", "", "")
+    if verdict in ("ask", "deny"):
+        log_event(verdict, reason, source, cmd)
+        emit(verdict, reason)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)

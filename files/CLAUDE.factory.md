@@ -44,6 +44,9 @@ Learn
 Autonomy
 - Proceed on reversible work and present the result. Always pause before
   hard-to-reverse actions: force-push, deploys, deleting data, messages to people.
+- A guard hook enforces this for Bash commands. When it asks or denies, that is
+  intentional: do not rephrase, split or obfuscate the command to get around it.
+  Tell the user what you wanted to run and why, and let them decide.
 - One task per session. Final reply: what changed, how it was verified, what is left.
 
 ## Fast decisions

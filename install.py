@@ -33,6 +33,7 @@ def hook_entries(cd):
                                          "PostToolUseFailure", "SubagentStart", "SubagentStop", "Stop")}
     entries["PostToolUseFailure"].append(f"python3 -I {b}/decide-hook")
     entries["PreToolUse"].append(f"python3 -I {b}/delegate-hook")
+    entries["PreToolUse"].append((f"python3 -I {b}/guard-hook", "Bash", 20))
     entries["UserPromptSubmit"].append(f"python3 -I {b}/delegate-hook")
     entries["Stop"].append(f"python3 -I {b}/done-gate")
     return entries, f"Bash({b}/decide:*)"
@@ -47,9 +48,11 @@ def new_settings(cur, cd, keep_models):
     for ev, cmds in entries.items():
         lst = hooks.setdefault(ev, [])
         have = {h.get("command") for g in lst for h in g.get("hooks", [])}
-        for c in cmds:
+        for item in cmds:
+            c, matcher, timeout = (item, None, 15) if isinstance(item, str) else item
             if c not in have:
-                lst.append({"hooks": [{"type": "command", "command": c, "timeout": 15}]})
+                group = {"hooks": [{"type": "command", "command": c, "timeout": timeout}]}
+                lst.append({"matcher": matcher, **group} if matcher else group)
     al = s.setdefault("permissions", {}).setdefault("allow", [])
     if allow not in al:
         al.append(allow)
